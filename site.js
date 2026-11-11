@@ -1,0 +1,429 @@
+/* Kerrier Laundry Co. - shared site behavior (all pages), v19 */
+
+// ── Analytics helper ─────────────────────────────────────────
+// Sends a GA4 event through gtag. Never throws, and does nothing if
+// gtag is missing (blocked by an ad blocker, offline, etc.).
+// Only send counts and categories here: never names, phones, emails
+// or typed addresses.
+// ── Form backend (swap here) ─────────────────────────────────
+// The out-of-area lead form, the out-of-zone address check notice and the Monthly Plan signup notice post JSON to this one endpoint. Today it is the "Lead Inquiry" Formspree
+// form on kerrierlaundryco@gmail.com. (The footer newsletter is
+// a MailerLite embed and does not use this. A ticked newsletter box on the
+// out-of-area form also goes to MailerLite through kerrierSubscribeNewsletter.) To move to an email tool later,
+// change this URL (and, if that tool needs a different body, the
+// buildBody function below).
+var KERRIER_FORM_ENDPOINT = "https://formspree.io/f/mkolbevp";
+
+(function () {
+    var SUBJECTS = {
+        map_form: "Out of area inquiry",
+        monthly_plan: "New Monthly Plan signup",
+        zone_check: "Out of zone address check"
+    };
+    function buildBody(data) {
+        var body = {};
+        for (var k in data) if (Object.prototype.hasOwnProperty.call(data, k)) body[k] = data[k];
+        // Formspree uses "email" (and "_replyto") as the reply-to address and
+        // rejects a blank one, so leave them out when nobody typed an email.
+        ["email", "_replyto"].forEach(function (key) {
+            if (!Object.prototype.hasOwnProperty.call(body, key)) return;
+            var v = body[key] == null ? "" : String(body[key]).trim();
+            if (v) body[key] = v; else delete body[key];
+        });
+        body.submitted_at = new Date().toISOString();
+        body.page = location.pathname.split("/").pop() || "index.html";
+        if (!body._subject && SUBJECTS[body.source]) body._subject = SUBJECTS[body.source];
+        return body;
+    }
+    // Resolves true when the backend accepted the submission.
+    window.kerrierSubmitForm = function (data) {
+        try {
+            return fetch(KERRIER_FORM_ENDPOINT, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify(buildBody(data))
+            }).then(function (r) { return r.ok; }, function () { return false; });
+        } catch (e) { return Promise.resolve(false); }
+    };
+})();
+
+// ── Newsletter subscribe (MailerLite) ───────────────────────
+// Adds an email to the website newsletter form 27MjK6 (group "Newsletter",
+// double opt-in), the same subscribe endpoint the footer embed posts to.
+// Only call this when the person ticked the newsletter box. MailerLite
+// then emails them a confirm link; they join the list after confirming.
+// Resolves true when MailerLite accepted the signup. Never throws.
+var KERRIER_NEWSLETTER_ENDPOINT = "https://assets.mailerlite.com/jsonp/2742056/forms/202354484931724608/subscribe";
+window.kerrierSubscribeNewsletter = function (email, name, town) {
+    try {
+        email = String(email || "").trim();
+        if (!email || !window.fetch || !window.FormData) return Promise.resolve(false);
+        var fd = new FormData();
+        fd.append("fields[email]", email);
+        if (name) fd.append("fields[name]", String(name).trim().split(/\s+/)[0]);
+        // Town and state only (e.g. "Bowling Green, KY"). Never a street address or ZIP.
+        town = String(town || "").replace(/\d+/g, "").replace(/\s+/g, " ").trim();
+        if (town) fd.append("fields[town_or_zip]", town);
+        fd.append("ml-submit", "1");
+        fd.append("anticsrf", "true");
+        return fetch(KERRIER_NEWSLETTER_ENDPOINT, { method: "POST", body: fd, headers: { "Accept": "application/json" } })
+            .then(function (r) {
+                if (!r.ok) return false;
+                return r.json().then(function (j) { return !j || j.success !== false; }, function () { return true; });
+            }, function () { return false; });
+    } catch (e) { return Promise.resolve(false); }
+};
+
+(function () {
+    function pageName() {
+        var p = (location.pathname.split("/").pop() || "index.html").replace(/\.html$/, "");
+        return p === "index" || p === "" ? "home" : p;
+    }
+    function track(name, params) {
+        try {
+            if (typeof window.gtag !== "function") return;
+            var p = { page: pageName(), transport_type: "beacon" };
+            if (params) for (var k in params) if (Object.prototype.hasOwnProperty.call(params, k)) p[k] = params[k];
+            window.gtag("event", name, p);
+        } catch (e) { /* analytics must never break the site */ }
+    }
+    window.kerrierTrack = track;
+
+    // Where on the page a link sits (for book_click / call_tap / text_tap)
+    function linkLocation(a) {
+        if (a.getAttribute("data-track-location")) return a.getAttribute("data-track-location");
+        if (a.closest(".book-bar")) return "mobile_bookbar";
+        if (a.closest(".nav-sheet-foot")) return "nav_menu";
+        if (a.closest(".site-header")) return "nav";
+        if (a.closest(".site-footer")) return "footer";
+        if (a.closest(".calculator-card")) return "address_checker";
+        if (a.closest(".hero, .page-hero")) return "hero";
+        if (a.closest(".closing")) return "closing_cta";
+        if (a.closest(".help-card")) return "help_card";
+        if (a.closest(".book-summary, .book-quick")) return "booking_page";
+        if (a.closest(".faq-list")) return "faq_answer";
+        return a.classList.contains("btn") ? "page_cta" : "inline_link";
+    }
+    var BOOK_RE = /(^|\/)scheduling_page\.html(\?|#|$)|(^|\/\/)(app\.)?cal\.com\//i;
+
+    // One delegated listener catches every link, including ones added later.
+    document.addEventListener("click", function (e) {
+        var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+        if (!a) return;
+        var href = a.getAttribute("href") || "";
+        if (/^tel:/i.test(href)) track("call_tap", { link_location: linkLocation(a) });
+        else if (/^sms:/i.test(href)) track("text_tap", { link_location: linkLocation(a) });
+        else if (BOOK_RE.test(href)) track("book_click", { link_location: linkLocation(a) });
+    }, true);
+
+    // Cal.com booking embed (booking page only).
+    // Documented public events: linkReady, bookerReady, bookingSuccessfulV2,
+    // bookingSuccessful (deprecated), linkFailed. Cal exposes NO event for
+    // picking a date or a time slot (checked against Cal's embed source and
+    // live on Oct 30 2026), so the two middle funnel steps use proxies:
+    //   booking_calendar_used: first __routeChanged after the calendar loads.
+    //     Cal fires __routeChanged (no data) whenever the booker changes its
+    //     URL: picking a date, changing month, picking a time, going back.
+    //   booking_time_selected: a time was picked and the details form opened.
+    //     Picking a time is the only step that makes the calendar frame
+    //     taller (+52px desktop, +146px mobile in testing; month changes and
+    //     date picks keep the height). So: after a route change, the frame
+    //     grows by FORM_GROWTH_PX or more over its loaded height.
+    // Funnel: calendar_loaded > booking_calendar_used > booking_time_selected
+    //   > booking_completed. Each fires at most once per page view.
+    // Listeners attach with retry on the "15min" namespace, the global Cal
+    // function, and Cal.ns["*"], so a late-loading embed still gets them.
+    // booked() is shared and de-duplicated by once(). Only non-personal
+    // fields are sent (is_recurring, booking_status, embed_event, error_code).
+    try {
+        var sent = {};
+        var once = function (name, params) { if (sent[name]) return; sent[name] = true; track(name, params); };
+        var bound = [];
+        var booked = function (e) {
+            var d = (e && e.detail && e.detail.data) || {};
+            once("booking_completed", {
+                is_recurring: d.isRecurring ? "yes" : "no",
+                booking_status: d.status ? String(d.status).toLowerCase().slice(0, 20) : "unknown"
+            });
+        };
+        var FORM_GROWTH_PX = 30;
+        var baseH = 0, baseW = 0, lastH = 0, lastW = 0, ready = false, moved = false;
+        var setBase = function () { if (lastH) { baseH = lastH; baseW = lastW; } ready = true; };
+        var onDim = function (e) {
+            var d = (e && e.detail && e.detail.data) || {};
+            var h = +d.iframeHeight || 0, w = +d.iframeWidth || 0;
+            if (!h) return;
+            lastH = h; lastW = w;
+            if (!ready) return;
+            // Before any click, or after a width change (rotation, resize),
+            // just re-measure the resting height; don't count it.
+            if (!moved || !baseH || (baseW && w && Math.abs(w - baseW) > 2)) { baseH = h; baseW = w; return; }
+            if (moved && h - baseH >= FORM_GROWTH_PX) {
+                once("booking_time_selected", { embed_event: "route_change_and_form_height" });
+            }
+        };
+        var onRoute = function () {
+            if (!ready) return;
+            moved = true;
+            once("booking_calendar_used", { embed_event: "__routeChanged" });
+        };
+        function bind(target) {
+            if (typeof target !== "function") return false;
+            if (bound.indexOf(target) !== -1) return true;
+            try {
+                var on = function (action, fn) { target("on", { action: action, callback: fn }); };
+                // linkReady has been reported to not always fire, so bookerReady is a backup.
+                on("linkReady", function () { once("calendar_loaded", { embed_event: "linkReady" }); });
+                on("bookerReady", function () { once("calendar_loaded", { embed_event: "bookerReady" }); });
+                on("linkFailed", function (e) {
+                    var d = (e && e.detail && e.detail.data) || {};
+                    once("calendar_error", { error_code: String(d.code || "unknown").slice(0, 40) });
+                });
+                on("bookingSuccessfulV2", booked);
+                on("bookingSuccessful", booked); // older name, de-duplicated by once()
+                on("__dimensionChanged", onDim);
+                on("linkReady", setBase);
+                on("bookerReady", setBase);
+                on("__routeChanged", onRoute);
+                bound.push(target);
+                return true;
+            } catch (err) { return false; }
+        }
+        var tries = 0, maxTries = 40;
+        var attempt = function () {
+            var cal = window.Cal;
+            var ns = cal && cal.ns;
+            bind(cal);
+            if (ns) {
+                bind(ns["15min"]);
+                bind(ns["*"]);
+            }
+            var hasNs = ns && bound.indexOf(ns["15min"]) !== -1;
+            if (hasNs) return;
+            tries += 1;
+            if (tries < maxTries) setTimeout(attempt, 250);
+        };
+        attempt();
+    } catch (e) { /* never break the page over analytics */ }
+})();
+
+(function () {
+    var root = document.documentElement;
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // Header: hairline once scrolled
+    var header = document.getElementById("site-header");
+    var bar = document.getElementById("book-bar");
+    var hero = document.querySelector("[data-bar-after]");
+    var closingVisible = false;
+
+    function updateBar() {
+        if (!bar) return;
+        var threshold = hero ? hero.getBoundingClientRect().bottom + window.scrollY - 80 : 480;
+        var show = window.scrollY > threshold && !closingVisible;
+        bar.classList.toggle("is-visible", show);
+        document.body.classList.toggle("bar-visible", show);
+        bar.setAttribute("aria-hidden", String(!show));
+        bar.querySelectorAll("a").forEach(function (a) { a.tabIndex = show ? 0 : -1; });
+    }
+    function onScroll() {
+        if (header) header.classList.toggle("is-scrolled", window.scrollY > 4);
+        updateBar();
+    }
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", updateBar, { passive: true });
+
+    if (bar && "IntersectionObserver" in window) {
+        var endObs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) { closingVisible = e.isIntersecting; });
+            updateBar();
+        }, { threshold: 0 });
+        document.querySelectorAll(".closing, .site-footer").forEach(function (el) { endObs.observe(el); });
+    }
+    onScroll();
+
+    // Mobile menu sheet
+    var toggle = document.getElementById("menu-toggle");
+    var nav = document.getElementById("main-nav");
+    if (toggle && nav) {
+        var setMenu = function (open, returnFocus) {
+            nav.classList.toggle("is-open", open);
+            root.classList.toggle("menu-open", open);
+            toggle.setAttribute("aria-expanded", String(open));
+            toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+            if (open) {
+                var first = nav.querySelector("a");
+                if (first) setTimeout(function () { first.focus({ preventScroll: true }); }, 60);
+            } else if (returnFocus) {
+                toggle.focus({ preventScroll: true });
+            }
+        };
+        toggle.addEventListener("click", function () { setMenu(toggle.getAttribute("aria-expanded") !== "true"); });
+        nav.querySelectorAll("a").forEach(function (a) { a.addEventListener("click", function () { setMenu(false); }); });
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape" && toggle.getAttribute("aria-expanded") === "true") setMenu(false, true);
+        });
+        window.matchMedia("(min-width: 834px)").addEventListener("change", function (m) { if (m.matches) setMenu(false); });
+    }
+
+    // FAQ accordion (button + aria-expanded + region)
+    document.querySelectorAll(".faq-question").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+            var open = btn.getAttribute("aria-expanded") === "true";
+            btn.setAttribute("aria-expanded", String(!open));
+            var panel = document.getElementById(btn.getAttribute("aria-controls"));
+            if (panel) panel.hidden = open;
+        });
+    });
+
+    // Hero image: gentle settle once loaded
+    document.querySelectorAll(".hero-media").forEach(function (m) {
+        var img = m.querySelector("img");
+        var done = function () { requestAnimationFrame(function () { m.classList.add("is-loaded"); }); };
+        if (!img || img.complete) done(); else { img.addEventListener("load", done); img.addEventListener("error", done); }
+    });
+
+    // Reveal on scroll (skipped for reduced motion)
+    var els = document.querySelectorAll(".reveal, .photo-moment, .photo-band");
+    if (reduce || !("IntersectionObserver" in window)) {
+        els.forEach(function (el) { el.classList.add("is-visible"); });
+    } else {
+        var observer = new IntersectionObserver(function (entries) {
+            entries.forEach(function (entry) {
+                if (entry.isIntersecting) { entry.target.classList.add("is-visible"); observer.unobserve(entry.target); }
+            });
+        }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+        els.forEach(function (el) { observer.observe(el); });
+    }
+
+    // Footer year
+    document.querySelectorAll(".footer-year").forEach(function (el) { el.textContent = new Date().getFullYear(); });
+})();
+
+// ── Footer newsletter (MailerLite embedded form, all pages) ──
+// MailerLite renders and submits the form itself. We only watch for its
+// success state and send a GA4 event with no personal info.
+(function () {
+    var root = document.getElementById("footer-signup");
+    if (!root || !("MutationObserver" in window)) return;
+    var sent = false, obs;
+    function check() {
+        if (sent) return;
+        var ok = root.querySelector(".ml-form-successBody");
+        if (!ok || ok.style.display === "none" || !ok.getClientRects().length) return;
+        sent = true;
+        if (obs) obs.disconnect();
+        if (typeof window.kerrierTrack === "function") window.kerrierTrack("newsletter_signup", { form_location: "footer" });
+    }
+    obs = new MutationObserver(check);
+    obs.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "class"] });
+    // MailerLite's documented hook after a successful subscribe (chained, not replaced).
+    var prev = window.ml_webform_after_success;
+    window.ml_webform_after_success = function () {
+        try { if (typeof prev === "function") prev.apply(this, arguments); } catch (e) {}
+        setTimeout(check, 0);
+        setTimeout(check, 400);
+    };
+})();
+
+// ── "Get Deals" side tab (all pages) ─────────────────────────
+// A plain link to #footer-signup (works without JS). With JS it
+// smooth-scrolls, highlights the signup, focuses the email box, sends a
+// GA4 event, and hides itself while the signup is already on screen.
+(function () {
+    var tab = document.getElementById("deals-tab");
+    var target = document.getElementById("footer-signup");
+    if (!tab || !target) return;
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var hideTimer;
+
+    function setHidden(hidden) {
+        tab.classList.toggle("is-hidden", hidden);
+        tab.setAttribute("aria-hidden", String(hidden));
+        tab.tabIndex = hidden ? -1 : 0;
+    }
+    if ("IntersectionObserver" in window) {
+        new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) { setHidden(e.isIntersecting); });
+        }, { threshold: 0.15 }).observe(target);
+    }
+
+    function focusSignup() {
+        var input = target.querySelector('input[type="email"], input[name="fields[email]"]');
+        if (input && input.offsetParent !== null) { input.focus({ preventScroll: true }); return; }
+        // Form not rendered yet (slow network): focus the section instead.
+        if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+        target.focus({ preventScroll: true });
+    }
+
+    tab.addEventListener("click", function (e) {
+        e.preventDefault();
+        if (typeof window.kerrierTrack === "function") window.kerrierTrack("deals_tab_click", {});
+        target.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+        target.classList.remove("is-highlight");
+        void target.offsetWidth; // restart the highlight animation
+        target.classList.add("is-highlight");
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(function () { target.classList.remove("is-highlight"); }, 2200);
+        setTimeout(focusSignup, reduce ? 0 : 450);
+    });
+})();
+
+// ── Monthly Laundry Plan interest form (services page only) ──
+// Posts to the MailerLite "Monthly Plan Interest" form (double opt-in),
+// the same subscribe endpoint MailerLite's own embeds use. The URL lives
+// in the form's action attribute in services.html, so swapping backends
+// is a one-line HTML change. GA4 gets an event with no personal info.
+(function () {
+    var form = document.getElementById("plan-form");
+    if (!form || !window.fetch || !window.FormData) return; // no JS/fetch: plain POST to the action URL
+    var email = document.getElementById("plan-email");
+    var consent = document.getElementById("plan-consent");
+    var btn = document.getElementById("plan-submit");
+    var errEl = document.getElementById("plan-error");
+    var okEl = document.getElementById("plan-success");
+    var label = btn.textContent;
+    function fail(msg, focusEl) {
+        errEl.textContent = msg; errEl.classList.remove("hidden");
+        if (focusEl) focusEl.focus();
+    }
+    email.addEventListener("input", function () { email.removeAttribute("aria-invalid"); });
+    form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        errEl.classList.add("hidden");
+        email.value = email.value.trim();
+        if (!email.value || !email.checkValidity()) {
+            email.setAttribute("aria-invalid", "true");
+            fail("Please enter a valid email address.", email); return;
+        }
+        if (!consent.checked) { fail("Please tick the box so we can email you the details.", consent); return; }
+        btn.disabled = true; btn.textContent = "Sending...";
+        fetch(form.action, { method: "POST", body: new FormData(form), headers: { "Accept": "application/json" } })
+            .then(function (r) {
+                if (!r.ok) return false;
+                return r.json().then(function (j) { return !j || j.success !== false; }, function () { return true; });
+            }, function () { return false; })
+            .then(function (ok) {
+                if (ok) {
+                    // Email notice to us via Formspree (same helper as the out-of-area form).
+                    // Fire and forget: never delays the thank-you or shows an error.
+                    try {
+                        if (typeof window.kerrierSubmitForm === "function") window.kerrierSubmitForm({
+                            source: "monthly_plan",
+                            form_type: "Monthly Plan interest",
+                            name: (document.getElementById("plan-name").value || "").trim(),
+                            email: email.value,
+                            _subject: "New Monthly Plan signup"
+                        }).catch(function () {});
+                    } catch (err) { /* ignore */ }
+                    if (typeof window.kerrierTrack === "function") window.kerrierTrack("monthly_plan_interest", { form_location: "services_pricing" });
+                    form.classList.add("hidden");
+                    okEl.classList.remove("hidden");
+                    okEl.focus({ preventScroll: true });
+                } else {
+                    btn.disabled = false; btn.textContent = label;
+                    fail("Something went wrong. Please call or text (270) 776-2464 and ask about the Monthly Plan.");
+                }
+            });
+    });
+})();
